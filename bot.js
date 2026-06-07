@@ -1,6 +1,6 @@
 // ============================================================
 //  World Cup Twitter Bot — Complete Production Script
-//  Stack: Node.js 20+, zero dependencies (stdlib only)
+//  Stack: Node.js 24+, zero dependencies (stdlib only)
 //  Env vars required (set as GitHub Secrets):
 //    ANTHROPIC_API_KEY
 //    TWITTER_API_KEY
@@ -12,12 +12,13 @@
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs");
 const { URL } = require("url");
 
 // ─── Config ────────────────────────────────────────────────
 
 const RSS_FEEDS = [
-  "http://feeds.bbci.co.uk/sport/football/rss.xml",
+  "https://feeds.bbci.co.uk/sport/football/rss.xml",
   "https://www.espn.com/espn/rss/soccer/news",
   "https://www.goal.com/feeds/en/news",
 ];
@@ -53,14 +54,19 @@ const TWEET_TYPES = [
 
 // ─── HTTP helper (no axios needed) ────────────────────────
 
-function httpGet(url, timeoutMs = 8000) {
+function httpGet(url, timeoutMs = 10000, redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (redirectCount > 5) return reject(new Error("Too many redirects"));
     const parsed = new URL(url);
     const lib = parsed.protocol === "https:" ? https : http;
     const req = lib.get(url, { timeout: timeoutMs }, (res) => {
-      // Follow single redirect
+      // Follow redirects
       if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
-        return httpGet(res.headers.location, timeoutMs).then(resolve).catch(reject);
+        const next = res.headers.location.startsWith("http")
+          ? res.headers.location
+          : `${parsed.protocol}//${parsed.host}${res.headers.location}`;
+        res.resume(); // drain response before redirecting
+        return httpGet(next, timeoutMs, redirectCount + 1).then(resolve).catch(reject);
       }
       let data = "";
       res.setEncoding("utf8");
@@ -68,7 +74,7 @@ function httpGet(url, timeoutMs = 8000) {
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
     req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("Request timed out")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error(`Request timed out: ${url}`)); });
   });
 }
 
@@ -111,13 +117,13 @@ function parseRSS(xml) {
 }
 
 function extractTag(str, tag) {
-  const m = str.match(new RegExp(`<${tag}[^>]*>(?:<\\!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, "i"));
+  const m = str.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, "i"));
   return m ? m[1].trim() : null;
 }
 
 function cleanText(str) {
   return str
-    .replace(/<[^>]+>/g, "")        // strip HTML tags
+    .replace(/<[^>]+>/g, "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -132,14 +138,15 @@ async function getLatestHeadlines() {
   const headlines = [];
   for (const feed of RSS_FEEDS) {
     try {
+      console.log(`📡 Fetching RSS: ${feed}`);
       const { body } = await httpGet(feed);
       const items = parseRSS(body).slice(0, 5);
+      console.log(`   Got ${items.length} items`);
       headlines.push(...items.map((i) => i.title));
     } catch (e) {
-      console.warn(`RSS fetch failed for ${feed}:`, e.message);
+      console.warn(`⚠️  RSS fetch failed for ${feed}:`, e.message);
     }
   }
-  // Deduplicate and return up to 10
   return [...new Set(headlines)].slice(0, 10);
 }
 
@@ -154,17 +161,17 @@ Write ONE tweet reacting to this news. Rules:
 - Max 2 relevant hashtags (e.g. #WorldCup #FIFA)
 - Sound like a real football fan, NOT a robot
 - No quotation marks around the tweet
-Output the tweet text only.`,
+Output the tweet text only. Nothing else.`,
 
   banter: (topic) => `You are a football banter account loved for being funny, relatable, and a little savage.
 Topic: "${topic}"
 Write ONE banter tweet. Rules:
-- Under 230 characters  
+- Under 230 characters
 - Use football fan humor — mock outrage, exaggeration, or roasting
 - Keep it tasteful (no slurs, no personal attacks)
 - Feel free to use caps for emphasis on 1-2 words
 - No hashtags needed
-Output the tweet text only.`,
+Output the tweet text only. Nothing else.`,
 
   hottake: (topic) => `You are a football pundit known for controversial but intelligent opinions.
 Topic: "${topic}"
@@ -173,7 +180,7 @@ Write ONE hot take tweet. Structure:
 2. One-line justification
 3. End with a question to spark debate
 Rules: under 220 characters, no hashtags, must be defensible not just trolling.
-Output the tweet text only.`,
+Output the tweet text only. Nothing else.`,
 
   africa: (topic) => `You are a football Twitter account that celebrates African football with pride and humor.
 Topic: "${topic}"
@@ -182,16 +189,18 @@ Write ONE tweet. Rules:
 - Mix pride, humor, and passion
 - Relatable to East African / African football fans
 - Can use 1-2 relevant hashtags like #AFCON or #WorldCup
-Output the tweet text only.`,
+Output the tweet text only. Nothing else.`,
 };
 
 async function generateTweet(type, context) {
   const prompt = PROMPTS[type](context);
+  console.log(`🤖 Calling Claude API (model: claude-haiku-4-5)...`);
+
   const res = await httpsPost(
     "https://api.anthropic.com/v1/messages",
     {
       model: "claude-haiku-4-5",
-      max_tokens: 120,
+      max_tokens: 150,
       messages: [{ role: "user", content: prompt }],
     },
     {
@@ -204,38 +213,39 @@ async function generateTweet(type, context) {
   if (res.status !== 200) {
     throw new Error(`Anthropic API error ${res.status}: ${res.body}`);
   }
+
   const data = JSON.parse(res.body);
-  return data.content[0].text.trim().replace(/^["']|["']$/g, ""); // strip wrapping quotes if any
+
+  if (!data.content || !data.content[0] || !data.content[0].text) {
+    throw new Error(`Unexpected Anthropic response: ${JSON.stringify(data)}`);
+  }
+
+  return data.content[0].text.trim().replace(/^["']|["']$/g, "");
 }
 
 // ─── Twitter OAuth 1.0a Signing ────────────────────────────
+// BUG FIX: For Twitter API v2 with JSON body, do NOT include
+// body params in the OAuth signature — only OAuth params go in.
+// Including JSON body fields in the signature causes 401 errors.
 
-function oauthSign(method, url, params, consumerKey, consumerSecret, tokenSecret) {
-  // 1. Collect all params and percent-encode keys + values
+function oauthSign(method, url, oauthParams, consumerSecret, tokenSecret) {
   const encode = (s) => encodeURIComponent(String(s));
 
-  const allParams = { ...params };
-  const paramString = Object.keys(allParams)
+  const paramString = Object.keys(oauthParams)
     .sort()
-    .map((k) => `${encode(k)}=${encode(allParams[k])}`)
+    .map((k) => `${encode(k)}=${encode(oauthParams[k])}`)
     .join("&");
 
-  // 2. Build signature base string
   const baseString = [method.toUpperCase(), encode(url), encode(paramString)].join("&");
-
-  // 3. Build signing key
   const signingKey = `${encode(consumerSecret)}&${encode(tokenSecret)}`;
 
-  // 4. HMAC-SHA1
-  const signature = crypto
+  return crypto
     .createHmac("sha1", signingKey)
     .update(baseString)
     .digest("base64");
-
-  return signature;
 }
 
-function buildAuthHeader(method, url, bodyParams = {}) {
+function buildAuthHeader(method, url) {
   const oauthParams = {
     oauth_consumer_key:     process.env.TWITTER_API_KEY,
     oauth_nonce:            crypto.randomBytes(16).toString("hex"),
@@ -245,40 +255,39 @@ function buildAuthHeader(method, url, bodyParams = {}) {
     oauth_version:          "1.0",
   };
 
-  // Include body params in signature calculation
-  const allParams = { ...oauthParams, ...bodyParams };
-
+  // Sign using ONLY oauth params (not the JSON body)
   oauthParams.oauth_signature = oauthSign(
     method,
     url,
-    allParams,
-    process.env.TWITTER_API_KEY,
+    oauthParams,
     process.env.TWITTER_API_SECRET,
     process.env.TWITTER_ACCESS_SECRET
   );
 
-  // Build Authorization header (only oauth_ params, NOT body params)
-  const headerValue =
+  return (
     "OAuth " +
     Object.keys(oauthParams)
       .sort()
       .map((k) => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`)
-      .join(", ");
-
-  return headerValue;
+      .join(", ")
+  );
 }
 
 // ─── Post Tweet ────────────────────────────────────────────
 
 async function postTweet(text) {
   const TWEET_URL = "https://api.twitter.com/2/tweets";
-  const body = JSON.stringify({ text });
+  console.log(`🐦 Posting to Twitter...`);
+
   const authHeader = buildAuthHeader("POST", TWEET_URL);
+  const body = JSON.stringify({ text });
 
   const res = await httpsPost(TWEET_URL, body, {
-    Authorization:   authHeader,
-    "Content-Type":  "application/json",
+    Authorization:  authHeader,
+    "Content-Type": "application/json",
   });
+
+  console.log(`   Twitter response status: ${res.status}`);
 
   if (res.status === 201) {
     const data = JSON.parse(res.body);
@@ -290,10 +299,9 @@ async function postTweet(text) {
   }
 }
 
-// ─── Deduplication (via GitHub Actions cache file) ─────────
+// ─── Deduplication ─────────────────────────────────────────
 
 const SEEN_FILE = "/tmp/seen_headlines.json";
-const fs = require("fs");
 
 function loadSeen() {
   try { return JSON.parse(fs.readFileSync(SEEN_FILE, "utf8")); }
@@ -301,15 +309,15 @@ function loadSeen() {
 }
 
 function saveSeen(arr) {
-  // Keep last 50 only
   fs.writeFileSync(SEEN_FILE, JSON.stringify(arr.slice(-50)));
 }
 
 function pickFreshHeadline(headlines) {
   const seen = loadSeen();
   const fresh = headlines.filter((h) => !seen.includes(h));
-  if (fresh.length === 0) return headlines[0]; // fallback: reuse oldest
-  const pick = fresh[Math.floor(Math.random() * fresh.length)];
+  const pick = fresh.length > 0
+    ? fresh[Math.floor(Math.random() * fresh.length)]
+    : headlines[0];
   seen.push(pick);
   saveSeen(seen);
   return pick;
@@ -318,9 +326,9 @@ function pickFreshHeadline(headlines) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log("🤖 World Cup Bot starting...");
+  console.log("⚽ World Cup Bot starting...");
 
-  // Validate env vars
+  // Validate all env vars up front
   const required = [
     "ANTHROPIC_API_KEY",
     "TWITTER_API_KEY",
@@ -331,38 +339,43 @@ async function main() {
   for (const key of required) {
     if (!process.env[key]) throw new Error(`Missing env var: ${key}`);
   }
+  console.log("✅ All env vars present");
 
   // Pick tweet type
   const type = TWEET_TYPES[Math.floor(Math.random() * TWEET_TYPES.length)];
-  console.log(`📝 Generating tweet type: ${type}`);
+  console.log(`📝 Tweet type: ${type}`);
 
   let context;
 
   if (type === "news") {
     const headlines = await getLatestHeadlines();
-    if (headlines.length === 0) throw new Error("No headlines fetched from RSS feeds");
-    context = pickFreshHeadline(headlines);
-    console.log(`📰 Headline: ${context}`);
+    if (headlines.length === 0) {
+      // Fallback to banter if RSS fails
+      console.warn("⚠️  No headlines found, falling back to banter");
+      context = BANTER_TOPICS[Math.floor(Math.random() * BANTER_TOPICS.length)];
+    } else {
+      context = pickFreshHeadline(headlines);
+      console.log(`📰 Headline: ${context}`);
+    }
   } else if (type === "banter") {
     context = BANTER_TOPICS[Math.floor(Math.random() * BANTER_TOPICS.length)];
   } else if (type === "hottake") {
-    // Mix of banter + africa topics for hot takes
     const all = [...BANTER_TOPICS, ...AFRICA_TOPICS];
     context = all[Math.floor(Math.random() * all.length)];
   } else {
     context = AFRICA_TOPICS[Math.floor(Math.random() * AFRICA_TOPICS.length)];
   }
 
-  // Generate tweet text via Claude
+  // Generate with Claude
   const tweetText = await generateTweet(type, context);
-  console.log(`✍️  Generated: ${tweetText}`);
+  console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
 
-  // Guard: enforce character limit
+  // Safety guard
   if (tweetText.length > 280) {
-    throw new Error(`Tweet too long (${tweetText.length} chars): ${tweetText}`);
+    throw new Error(`Tweet too long (${tweetText.length} chars)`);
   }
 
-  // Post to Twitter
+  // Post
   await postTweet(tweetText);
 }
 
