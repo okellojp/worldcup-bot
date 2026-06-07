@@ -191,7 +191,7 @@ async function generateTweet(type, context) {
   const res = await httpsPost(
     "https://api.groq.com/openai/v1/chat/completions",
     {
-      model: "llama3-8b-8192",
+      model: "llama-3.3-70b-versatile",
       max_tokens: 150,
       temperature: 0.9,
       messages: [{ role: "user", content: PROMPTS[type](context) }],
