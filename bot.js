@@ -1,30 +1,42 @@
 // ============================================================
-//  World Cup Twitter Bot — 100% Free Version
+//  World Cup Twitter Bot — Full Version with Quote Tweeting
 //  AI: Groq (free tier) running Llama 3
 //  Scheduler: GitHub Actions (free)
-//  Posting: X/Twitter API (free tier)
+//  Posting: X/Twitter API (pay-per-use)
 //
 //  GitHub Secrets required:
-//    GROQ_API_KEY         → console.groq.com → API Keys
-//    TWITTER_API_KEY      → developer.twitter.com
-//    TWITTER_API_SECRET   → developer.twitter.com
-//    TWITTER_ACCESS_TOKEN → developer.twitter.com
-//    TWITTER_ACCESS_SECRET→ developer.twitter.com
+//    GROQ_API_KEY
+//    TWITTER_API_KEY
+//    TWITTER_API_SECRET
+//    TWITTER_ACCESS_TOKEN
+//    TWITTER_ACCESS_SECRET
 // ============================================================
 
-const https = require("https");
-const http  = require("http");
+const https  = require("https");
+const http   = require("http");
 const crypto = require("crypto");
 const fs     = require("fs");
 const { URL } = require("url");
 
-// ─── Config ────────────────────────────────────────────────
+// ─── Target accounts for quote tweeting ───────────────────
 
-const RSS_FEEDS = [
-  "https://feeds.bbci.co.uk/sport/football/rss.xml",
-  "https://www.espn.com/espn/rss/soccer/news",
-  "https://www.goal.com/feeds/en/news",
+const QUOTE_ACCOUNTS = [
+  "UTDTrey",
+  "CFC_Janty",
+  "WelBeast",
+  "ThaEuropeanLad",
+  "TrollFootball",
+  "markgoldbridge",
+  "433",
+  "brfootball",
+  // Global giants
+  "FabrizioRomano",
+  "OptaJoe",
+  "BBCSport",
+  "ESPN_FC",
 ];
+
+// ─── Banter & topic pools ──────────────────────────────────
 
 const BANTER_TOPICS = [
   "VAR decisions ruining football",
@@ -50,12 +62,19 @@ const AFRICA_TOPICS = [
   "African coaches proving themselves on the world stage",
 ];
 
-// Weighted pool — news & banter post most
+const RSS_FEEDS = [
+  "https://feeds.bbci.co.uk/sport/football/rss.xml",
+  "https://www.espn.com/espn/rss/soccer/news",
+  "https://www.goal.com/feeds/en/news",
+];
+
+// Weighted pool — 30% quote tweets, rest original posts
 const TWEET_TYPES = [
-  "news", "news", "news",
-  "banter", "banter", "banter",
-  "hottake", "hottake",
-  "africa", "africa",
+  "news",       "news",       "news",
+  "banter",     "banter",     "banter",
+  "hottake",    "hottake",
+  "africa",     "africa",
+  "quote",      "quote",      "quote",
 ];
 
 // ─── HTTP helpers ──────────────────────────────────────────
@@ -153,6 +172,68 @@ async function getLatestHeadlines() {
   return [...new Set(headlines)].slice(0, 10);
 }
 
+// ─── Fetch latest tweet from a target account ─────────────
+
+async function getLatestTweetFromAccount(username) {
+  console.log(`🔍 Fetching latest tweet from @${username}...`);
+
+  // Step 1: get user ID from username
+  const userUrl = `https://api.twitter.com/2/users/by/username/${username}`;
+  const userRes = await httpsGet_twitter(userUrl);
+
+  if (userRes.status !== 200) {
+    throw new Error(`Could not fetch user @${username}: ${userRes.status} ${userRes.body}`);
+  }
+
+  const userData = JSON.parse(userRes.body);
+  if (!userData.data) throw new Error(`User @${username} not found`);
+  const userId = userData.data.id;
+
+  // Step 2: get their latest tweet
+  const timelineUrl = `https://api.twitter.com/2/users/${userId}/tweets?max_results=5&tweet.fields=public_metrics&exclude=retweets,replies`;
+  const timelineRes = await httpsGet_twitter(timelineUrl);
+
+  if (timelineRes.status !== 200) {
+    throw new Error(`Could not fetch tweets for @${username}: ${timelineRes.status} ${timelineRes.body}`);
+  }
+
+  const timelineData = JSON.parse(timelineRes.body);
+  if (!timelineData.data || timelineData.data.length === 0) {
+    throw new Error(`No tweets found for @${username}`);
+  }
+
+  // Pick the tweet with most likes (most viral)
+  const sorted = timelineData.data.sort(
+    (a, b) => (b.public_metrics?.like_count || 0) - (a.public_metrics?.like_count || 0)
+  );
+
+  const tweet = sorted[0];
+  console.log(`   ✓ Found tweet ID ${tweet.id}: "${tweet.text.substring(0, 60)}..."`);
+  return { id: tweet.id, text: tweet.text, username };
+}
+
+// Twitter GET with OAuth
+function httpsGet_twitter(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const authHeader = buildAuthHeader("GET", `${parsed.protocol}//${parsed.host}${parsed.pathname}`, Object.fromEntries(parsed.searchParams));
+    const options = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: "GET",
+      headers: { Authorization: authHeader },
+    };
+    const req = https.request(options, (res) => {
+      let resp = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (resp += c));
+      res.on("end", () => resolve({ status: res.statusCode, body: resp }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 // ─── Groq AI — Tweet Generator ────────────────────────────
 
 const PROMPTS = {
@@ -160,33 +241,50 @@ const PROMPTS = {
     `You are a witty World Cup Twitter account with a sharp football brain.
 Headline: "${headline}"
 Write ONE tweet reacting to this news.
-Rules: under 230 characters, add a hot take or sarcastic reaction, max 2 hashtags (e.g. #WorldCup #FIFA), sound like a real football fan NOT a robot, no quotation marks.
+Rules: under 230 characters, add a hot take or sarcastic reaction, max 2 hashtags (e.g. #WorldCup #FIFA), sound like a real football fan NOT a robot, no quotation marks, always include 1-2 relevant emojis (⚽ 🚨 🔥 👀 💥 😤).
 Output the tweet text only. Nothing else.`,
 
   banter: (topic) =>
     `You are a football banter account — funny, relatable, and a little savage.
 Topic: "${topic}"
 Write ONE banter tweet.
-Rules: under 230 characters, use football fan humor (mock outrage, exaggeration, roasting), keep it tasteful, caps allowed on 1-2 words for emphasis, no hashtags needed.
+Rules: under 230 characters, use football fan humor (mock outrage, exaggeration, roasting), keep it tasteful, caps allowed on 1-2 words for emphasis, always include 1-2 relevant emojis (😂 💀 😭 🔥 ⚽ 😤 👀).
 Output the tweet text only. Nothing else.`,
 
   hottake: (topic) =>
     `You are a football pundit known for controversial but intelligent opinions.
 Topic: "${topic}"
-Write ONE hot take tweet: bold claim first, one-line justification, end with a debate question.
-Rules: under 220 characters, no hashtags, must be defensible not just trolling.
+Write ONE hot take tweet: bold controversial claim first, one-line justification, end with a debate question.
+Rules: under 220 characters, no hashtags, must be defensible not just trolling, always include 1 emoji that matches the energy (🔥 💀 👀 🎯 😤).
 Output the tweet text only. Nothing else.`,
 
   africa: (topic) =>
     `You are a football Twitter account celebrating African football with pride and humor.
 Topic: "${topic}"
 Write ONE tweet mixing pride, humor and passion. Relatable to East African and African football fans. Max 2 hashtags like #AFCON or #WorldCup.
-Rules: under 230 characters.
+Rules: under 230 characters, always include 1-2 relevant emojis (🌍 ⚽ 🔥 💪 👑 🇺🇬).
 Output the tweet text only. Nothing else.`,
+
+  quote: (originalTweet, username) =>
+    `You are a savage but funny football banter account.
+A big football account @${username} just tweeted: "${originalTweet}"
+Write a quote tweet response — add your own funny, witty, or savage football banter on top of their tweet.
+Rules:
+- Under 200 characters (leave room for the quoted tweet link)
+- Be funny, punchy, and reactive to what they said
+- Can agree with extra hype, disagree with roasting, or add a funny angle
+- Always include 1-2 emojis (😂 🔥 💀 👀 ⚽ 😭 🤣)
+- No hashtags needed
+- Sound like a real passionate football fan
+Output the quote tweet text only. Nothing else.`,
 };
 
-async function generateTweet(type, context) {
-  console.log(`🤖 Calling Groq API (llama3-8b-8192)...`);
+async function generateTweet(type, context, extra = null) {
+  console.log(`🤖 Calling Groq API (llama-3.3-70b-versatile)...`);
+
+  const prompt = type === "quote"
+    ? PROMPTS.quote(context, extra)
+    : PROMPTS[type](context);
 
   const res = await httpsPost(
     "https://api.groq.com/openai/v1/chat/completions",
@@ -194,7 +292,7 @@ async function generateTweet(type, context) {
       model: "llama-3.3-70b-versatile",
       max_tokens: 150,
       temperature: 0.9,
-      messages: [{ role: "user", content: PROMPTS[type](context) }],
+      messages: [{ role: "user", content: prompt }],
     },
     {
       "Content-Type": "application/json",
@@ -207,7 +305,6 @@ async function generateTweet(type, context) {
   }
 
   const data = JSON.parse(res.body);
-
   if (!data.choices || !data.choices[0] || !data.choices[0].message) {
     throw new Error(`Unexpected Groq response: ${JSON.stringify(data)}`);
   }
@@ -228,7 +325,7 @@ function oauthSign(method, url, oauthParams, consumerSecret, tokenSecret) {
   return crypto.createHmac("sha1", signingKey).update(baseString).digest("base64");
 }
 
-function buildAuthHeader(method, url) {
+function buildAuthHeader(method, url, queryParams = {}) {
   const oauthParams = {
     oauth_consumer_key:     process.env.TWITTER_API_KEY,
     oauth_nonce:            crypto.randomBytes(16).toString("hex"),
@@ -238,8 +335,13 @@ function buildAuthHeader(method, url) {
     oauth_version:          "1.0",
   };
 
+  // For GET requests, query params are included in signature
+  const signingParams = method === "GET"
+    ? { ...oauthParams, ...queryParams }
+    : { ...oauthParams };
+
   oauthParams.oauth_signature = oauthSign(
-    method, url, oauthParams,
+    method, url, signingParams,
     process.env.TWITTER_API_SECRET,
     process.env.TWITTER_ACCESS_SECRET
   );
@@ -253,11 +355,11 @@ function buildAuthHeader(method, url) {
   );
 }
 
-// ─── Post Tweet ────────────────────────────────────────────
+// ─── Post original tweet ───────────────────────────────────
 
 async function postTweet(text) {
   const TWEET_URL = "https://api.twitter.com/2/tweets";
-  console.log(`🐦 Posting to Twitter...`);
+  console.log(`🐦 Posting tweet...`);
 
   const res = await httpsPost(
     TWEET_URL,
@@ -269,10 +371,35 @@ async function postTweet(text) {
   );
 
   console.log(`   Twitter response: ${res.status}`);
-
   if (res.status === 201) {
     const data = JSON.parse(res.body);
     console.log(`✅ Tweet posted! ID: ${data.data.id}`);
+    console.log(`   "${text}"`);
+    return data;
+  } else {
+    throw new Error(`Twitter API error ${res.status}: ${res.body}`);
+  }
+}
+
+// ─── Post quote tweet ──────────────────────────────────────
+
+async function postQuoteTweet(text, quoteTweetId) {
+  const TWEET_URL = "https://api.twitter.com/2/tweets";
+  console.log(`🔁 Posting quote tweet on top of tweet ID ${quoteTweetId}...`);
+
+  const res = await httpsPost(
+    TWEET_URL,
+    JSON.stringify({ text, quote_tweet_id: quoteTweetId }),
+    {
+      Authorization:  buildAuthHeader("POST", TWEET_URL),
+      "Content-Type": "application/json",
+    }
+  );
+
+  console.log(`   Twitter response: ${res.status}`);
+  if (res.status === 201) {
+    const data = JSON.parse(res.body);
+    console.log(`✅ Quote tweet posted! ID: ${data.data.id}`);
     console.log(`   "${text}"`);
     return data;
   } else {
@@ -307,7 +434,7 @@ function pickFreshHeadline(headlines) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log("⚽ World Cup Bot starting (Groq free tier)...");
+  console.log("⚽ World Cup Bot starting (with quote tweet support)...");
 
   // Validate secrets
   const required = [
@@ -326,6 +453,37 @@ async function main() {
   const type = TWEET_TYPES[Math.floor(Math.random() * TWEET_TYPES.length)];
   console.log(`📝 Tweet type: ${type}`);
 
+  // ── Quote tweet flow ──
+  if (type === "quote") {
+    // Pick a random target account
+    const username = QUOTE_ACCOUNTS[Math.floor(Math.random() * QUOTE_ACCOUNTS.length)];
+    console.log(`🎯 Target account: @${username}`);
+
+    try {
+      const targetTweet = await getLatestTweetFromAccount(username);
+      const banterText  = await generateTweet("quote", targetTweet.text, username);
+
+      console.log(`✍️  Generated quote (${banterText.length} chars): ${banterText}`);
+
+      if (banterText.length > 280) {
+        throw new Error(`Quote tweet too long: ${banterText.length} chars`);
+      }
+
+      await postQuoteTweet(banterText, targetTweet.id);
+
+    } catch (e) {
+      // If quote tweet fails for any reason, fall back to banter
+      console.warn(`⚠️  Quote tweet failed (${e.message}), falling back to banter`);
+      const context = BANTER_TOPICS[Math.floor(Math.random() * BANTER_TOPICS.length)];
+      const tweetText = await generateTweet("banter", context);
+      console.log(`✍️  Fallback (${tweetText.length} chars): ${tweetText}`);
+      await postTweet(tweetText);
+    }
+
+    return;
+  }
+
+  // ── Original tweet flow ──
   let context;
 
   if (type === "news") {
@@ -346,7 +504,6 @@ async function main() {
     context = AFRICA_TOPICS[Math.floor(Math.random() * AFRICA_TOPICS.length)];
   }
 
-  // Generate tweet
   const tweetText = await generateTweet(type, context);
   console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
 
@@ -354,7 +511,6 @@ async function main() {
     throw new Error(`Tweet too long: ${tweetText.length} chars`);
   }
 
-  // Post it
   await postTweet(tweetText);
 }
 
