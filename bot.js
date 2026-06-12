@@ -1,6 +1,6 @@
 // ============================================================
-//  World Cup Twitter Bot — Breaking News Edition
-//  Every tweet is anchored to REAL news happening today
+//  World Cup Twitter Bot — Professional News Edition
+//  Tweets real news WITH details, serious tone, no banter
 //  AI: Groq (free tier) — llama-3.3-70b-versatile
 //  Scheduler: GitHub Actions (free)
 //  Posting: X/Twitter API (pay-per-use)
@@ -19,37 +19,28 @@ const crypto  = require("crypto");
 const fs      = require("fs");
 const { URL } = require("url");
 
-// ─── RSS Feeds — multiple sources for max coverage ─────────
+// ─── RSS Feeds ─────────────────────────────────────────────
 
 const RSS_FEEDS = [
-  { url: "https://feeds.bbci.co.uk/sport/football/rss.xml",      source: "BBC Sport"    },
-  { url: "https://www.espn.com/espn/rss/soccer/news",            source: "ESPN Soccer"  },
-  { url: "https://www.goal.com/feeds/en/news",                   source: "Goal.com"     },
-  { url: "https://www.skysports.com/rss/12040",                  source: "Sky Sports"   },
-  { url: "https://talksport.com/feed/",                          source: "TalkSPORT"    },
+  { url: "https://feeds.bbci.co.uk/sport/football/rss.xml",   source: "BBC Sport"   },
+  { url: "https://www.espn.com/espn/rss/soccer/news",         source: "ESPN Soccer" },
+  { url: "https://www.goal.com/feeds/en/news",                source: "Goal.com"    },
+  { url: "https://www.skysports.com/rss/12040",               source: "Sky Sports"  },
+  { url: "https://talksport.com/feed/",                       source: "TalkSPORT"   },
 ];
 
-// Big accounts to quote tweet — used with hardcoded tweet URL format
+// Big accounts to quote tweet
 const QUOTE_ACCOUNTS = [
-  "433",
-  "TrollFootball",
-  "markgoldbridge",
-  "brfootball",
-  "OptaJoe",
-  "FabrizioRomano",
-  "UTDTrey",
-  "WelBeast",
-  "CFC_Janty",
-  "ThaEuropeanLad",
-  "ESPN_FC",
-  "BBCSport",
+  "433", "OptaJoe", "FabrizioRomano",
+  "brfootball", "BBCSport", "ESPN_FC",
+  "SkySportsNews", "goal", "TalkSPORT",
 ];
 
-// Weighted pool — 50% breaking news, 30% news banter, 20% quote tweet
+// Weighted pool — 50% news report, 30% analysis, 20% quote tweet
 const TWEET_TYPES = [
-  "breaking", "breaking", "breaking", "breaking", "breaking",
-  "newsbanter", "newsbanter", "newsbanter",
-  "quote", "quote",
+  "news",     "news",     "news",     "news",     "news",
+  "analysis", "analysis", "analysis",
+  "quote",    "quote",
 ];
 
 // ─── HTTP helpers ──────────────────────────────────────────
@@ -70,7 +61,7 @@ function httpGet(url, timeoutMs = 10000, redirectCount = 0) {
       }
       let data = "";
       res.setEncoding("utf8");
-      res.on("data", (chunk) => (data += chunk));
+      res.on("data", chunk => (data += chunk));
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
     req.on("error", reject);
@@ -82,16 +73,16 @@ function httpsPost(url, body, headers) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const data   = typeof body === "string" ? body : JSON.stringify(body);
-    const options = {
+    const opts   = {
       hostname: parsed.hostname,
       path:     parsed.pathname + parsed.search,
       method:   "POST",
       headers:  { "Content-Length": Buffer.byteLength(data), ...headers },
     };
-    const req = https.request(options, (res) => {
+    const req = https.request(opts, (res) => {
       let resp = "";
       res.setEncoding("utf8");
-      res.on("data", (c) => (resp += c));
+      res.on("data", c => (resp += c));
       res.on("end", () => resolve({ status: res.statusCode, body: resp }));
     });
     req.on("error", reject);
@@ -100,17 +91,17 @@ function httpsPost(url, body, headers) {
   });
 }
 
-// ─── RSS Parser ────────────────────────────────────────────
+// ─── RSS Parser — extracts title AND description ───────────
 
 function parseRSS(xml) {
   const items = [];
   const itemRegex = /<item[\s>]([\s\S]*?)<\/item>/gi;
   let match;
   while ((match = itemRegex.exec(xml)) !== null) {
-    const block = match[1];
-    const title = extractTag(block, "title");
-    const desc  = extractTag(block, "description");
-    const link  = extractTag(block, "link");
+    const block   = match[1];
+    const title   = extractTag(block, "title");
+    const desc    = extractTag(block, "description");
+    const link    = extractTag(block, "link");
     const pubDate = extractTag(block, "pubDate");
     if (title) items.push({
       title:       cleanText(title),
@@ -123,7 +114,9 @@ function parseRSS(xml) {
 }
 
 function extractTag(str, tag) {
-  const m = str.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, "i"));
+  const m = str.match(new RegExp(
+    `<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, "i"
+  ));
   return m ? m[1].trim() : null;
 }
 
@@ -135,7 +128,7 @@ function cleanText(str) {
     .replace(/\s+/g, " ").trim();
 }
 
-// ─── Fetch & rank latest headlines ────────────────────────
+// ─── Fetch headlines with full descriptions ────────────────
 
 async function getLatestHeadlines() {
   const allItems = [];
@@ -147,7 +140,7 @@ async function getLatestHeadlines() {
       const items = parseRSS(body)
         .slice(0, 8)
         .map(item => ({ ...item, source: feed.source }));
-      console.log(`   ✓ ${items.length} headlines`);
+      console.log(`   ✓ ${items.length} stories`);
       allItems.push(...items);
     } catch (e) {
       console.warn(`   ⚠️  ${feed.source} failed: ${e.message}`);
@@ -156,10 +149,10 @@ async function getLatestHeadlines() {
 
   if (allItems.length === 0) return [];
 
-  // Sort by most recent first
+  // Sort newest first
   allItems.sort((a, b) => b.pubDate - a.pubDate);
 
-  // Deduplicate by similar titles
+  // Deduplicate
   const seen  = new Set();
   const fresh = [];
   for (const item of allItems) {
@@ -167,11 +160,11 @@ async function getLatestHeadlines() {
     if (!seen.has(key)) { seen.add(key); fresh.push(item); }
   }
 
-  console.log(`📰 Total unique headlines: ${fresh.length}`);
+  console.log(`📰 ${fresh.length} unique stories available`);
   return fresh.slice(0, 15);
 }
 
-// ─── Deduplication — avoid repeating same news ─────────────
+// ─── Deduplication ─────────────────────────────────────────
 
 const SEEN_FILE = "/tmp/seen_headlines.json";
 
@@ -189,11 +182,10 @@ function pickFreshHeadline(headlines) {
   const fresh = headlines.filter(h => !seen.includes(h.title));
 
   if (fresh.length === 0) {
-    console.warn("⚠️  All headlines already used — picking most recent anyway");
+    console.warn("⚠️  All headlines seen — using most recent");
     return headlines[0];
   }
 
-  // Pick from top 5 freshest
   const pool = fresh.slice(0, 5);
   const pick = pool[Math.floor(Math.random() * pool.length)];
   seen.push(pick.title);
@@ -201,58 +193,76 @@ function pickFreshHeadline(headlines) {
   return pick;
 }
 
-// ─── Groq AI prompts ───────────────────────────────────────
+// ─── Prompts ───────────────────────────────────────────────
 
 const PROMPTS = {
 
-  // 50% — Sharp breaking news reaction
-  breaking: (headline, source) => `You are a sharp, opinionated football Twitter account that reacts to breaking news in real time.
-BREAKING NEWS from ${source}: "${headline}"
+  // 50% — Straight news report with detail
+  news: (title, description, source) =>
+    `You are a professional football news Twitter account covering the World Cup and global football.
 
-Write ONE punchy tweet reacting to this news RIGHT NOW.
+News from ${source}:
+HEADLINE: "${title}"
+DETAILS: "${description}"
+
+Write ONE informative tweet that reports this news story with key details included.
+
 Rules:
-- Start with energy — this is BREAKING, make it feel urgent and exciting
-- Add a strong opinion, prediction, or hot take about this news
-- Sound like a passionate football fan who just read this headline
-- Max 2 relevant hashtags e.g. #WorldCup #FIFA #PremierLeague
-- Always include 1-2 fitting emojis (🚨 ⚽ 🔥 👀 💥 😤 🤯)
-- Under 230 characters
-- NO generic reactions — be SPECIFIC to this exact headline
+- Include the most important facts from both the headline AND the details
+- Write in a clear, professional, journalistic tone — no jokes, no banter, no sarcasm
+- Structure: state what happened, add 1 key detail or context that matters
+- Use 1 relevant football emoji only if it adds clarity (⚽ 🏆 📋) — no party emojis, no laugh emojis
+- Add 1-2 relevant hashtags e.g. #WorldCup #PremierLeague #UEFA
+- Under 270 characters
+- Do NOT just repeat the headline — expand on it with the detail provided
 - No quotation marks around the tweet
+
 Output the tweet text only. Nothing else.`,
 
-  // 30% — Funny news-based banter anchored to real headline
-  newsbanter: (headline, source) => `You are a savage football banter account that makes people laugh about real football news.
-TODAY'S NEWS from ${source}: "${headline}"
+  // 30% — Analytical take with context
+  analysis: (title, description, source) =>
+    `You are an experienced football analyst and journalist on Twitter.
 
-Write ONE funny banter tweet inspired by this specific news story.
+News from ${source}:
+HEADLINE: "${title}"
+DETAILS: "${description}"
+
+Write ONE analytical tweet that puts this news in context and explains why it matters.
+
 Rules:
-- Be funny, savage, or sarcastically react to this specific news
-- Mock outrage, exaggeration, or roasting based on WHAT ACTUALLY HAPPENED
-- Feel like a real fan venting or celebrating about this specific story
-- Caps on 1-2 words for emphasis
-- Always include 1-2 emojis (😂 💀 😭 🔥 ⚽ 🤣 👀)
-- Under 230 characters
-- Must reference something SPECIFIC from the headline — no generic football banter
-- No hashtags needed
+- Go beyond the headline — explain the significance or implication of this story
+- Reference specific facts from the details provided
+- Write like a knowledgeable football journalist giving informed commentary
+- Serious, credible tone — no memes, no banter, no jokes
+- Can include a stat, historical context, or tactical implication if relevant
+- Use 1 relevant hashtag max
+- No emojis unless absolutely necessary (e.g. ⚽ for football context only)
+- Under 270 characters
+
 Output the tweet text only. Nothing else.`,
 
-  // 20% — Quote tweet a big account with news-based banter
-  quotebanter: (headline, username) => `You are a football banter account reacting to what @${username} just posted about this news: "${headline}"
+  // 20% — Serious quote tweet reacting to a big account's news
+  quotereact: (title, description, username) =>
+    `You are a professional football journalist on Twitter.
 
-Write a quote tweet adding your own savage, funny, or hyped reaction ON TOP of their take.
+@${username} just posted about this story:
+HEADLINE: "${title}"
+DETAILS: "${description}"
+
+Write a quote tweet that adds journalistic value — extra context, a key stat, an important detail they may have missed, or a well-informed perspective.
+
 Rules:
-- React as if you just saw their tweet and have something to add
-- Can agree with extra hype, disagree with a roast, or add a funnier angle
-- Reference the actual news story — be SPECIFIC not generic
-- Always include 1-2 emojis (😂 🔥 💀 👀 ⚽ 😭 🤣)
-- Under 200 characters (quote tweet link takes up space)
-- No hashtags
+- Serious, professional tone — no jokes, no banter
+- Add something of VALUE beyond what was already said
+- Reference specific facts from the details
+- Under 200 characters (quoted tweet takes up space)
+- 1 hashtag max, no unnecessary emojis
+
 Output the quote tweet text only. Nothing else.`,
 
 };
 
-// ─── Groq API call ─────────────────────────────────────────
+// ─── Groq API ──────────────────────────────────────────────
 
 async function generateTweet(promptText) {
   console.log(`🤖 Calling Groq (llama-3.3-70b-versatile)...`);
@@ -261,8 +271,8 @@ async function generateTweet(promptText) {
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model:       "llama-3.3-70b-versatile",
-      max_tokens:  160,
-      temperature: 0.85,
+      max_tokens:  180,
+      temperature: 0.6,   // lower = more focused, professional
       messages:    [{ role: "user", content: promptText }],
     },
     {
@@ -284,7 +294,7 @@ async function generateTweet(promptText) {
 // ─── Twitter OAuth 1.0a ────────────────────────────────────
 
 function oauthSign(method, url, params, consumerSecret, tokenSecret) {
-  const encode      = (s) => encodeURIComponent(String(s));
+  const encode      = s => encodeURIComponent(String(s));
   const paramString = Object.keys(params).sort()
     .map(k => `${encode(k)}=${encode(params[k])}`).join("&");
   const baseString  = [method.toUpperCase(), encode(url), encode(paramString)].join("&");
@@ -309,22 +319,20 @@ function buildAuthHeader(method, url, queryParams = {}) {
     .join(", ");
 }
 
-// ─── Fetch latest tweet ID from a big account ─────────────
+// ─── Fetch latest tweet ID from account ───────────────────
 
 async function getLatestTweetId(username) {
   console.log(`🔍 Fetching latest tweet from @${username}...`);
 
-  // Get user ID
   const userUrl = `https://api.twitter.com/2/users/by/username/${username}`;
   const userRes = await new Promise((resolve, reject) => {
-    const parsed  = new URL(userUrl);
-    const options = {
+    const parsed = new URL(userUrl);
+    const req = https.request({
       hostname: parsed.hostname,
       path:     parsed.pathname,
       method:   "GET",
       headers:  { Authorization: buildAuthHeader("GET", userUrl) },
-    };
-    const req = https.request(options, (res) => {
+    }, res => {
       let body = "";
       res.on("data", c => (body += c));
       res.on("end", () => resolve({ status: res.statusCode, body }));
@@ -333,22 +341,21 @@ async function getLatestTweetId(username) {
     req.end();
   });
 
-  if (userRes.status !== 200) throw new Error(`User lookup failed: ${userRes.status} ${userRes.body}`);
+  if (userRes.status !== 200) throw new Error(`User lookup failed: ${userRes.status}`);
   const userId = JSON.parse(userRes.body).data?.id;
   if (!userId) throw new Error(`No user ID for @${username}`);
 
-  // Get their latest tweet
-  const tlUrl  = `https://api.twitter.com/2/users/${userId}/tweets?max_results=5&exclude=retweets,replies`;
-  const tlRes  = await new Promise((resolve, reject) => {
+  const tlUrl = `https://api.twitter.com/2/users/${userId}/tweets?max_results=5&exclude=retweets,replies`;
+  const tlRes = await new Promise((resolve, reject) => {
     const parsed  = new URL(tlUrl);
     const qParams = Object.fromEntries(parsed.searchParams);
-    const options = {
+    const req = https.request({
       hostname: parsed.hostname,
       path:     parsed.pathname + parsed.search,
       method:   "GET",
-      headers:  { Authorization: buildAuthHeader("GET", `${parsed.protocol}//${parsed.host}${parsed.pathname}`, qParams) },
-    };
-    const req = https.request(options, (res) => {
+      headers:  { Authorization: buildAuthHeader("GET",
+        `${parsed.protocol}//${parsed.host}${parsed.pathname}`, qParams) },
+    }, res => {
       let body = "";
       res.on("data", c => (body += c));
       res.on("end", () => resolve({ status: res.statusCode, body }));
@@ -357,11 +364,11 @@ async function getLatestTweetId(username) {
     req.end();
   });
 
-  if (tlRes.status !== 200) throw new Error(`Timeline fetch failed: ${tlRes.status} ${tlRes.body}`);
+  if (tlRes.status !== 200) throw new Error(`Timeline failed: ${tlRes.status}`);
   const tweets = JSON.parse(tlRes.body).data;
-  if (!tweets || tweets.length === 0) throw new Error(`No tweets for @${username}`);
+  if (!tweets?.length) throw new Error(`No tweets for @${username}`);
 
-  console.log(`   ✓ Got tweet ID: ${tweets[0].id}`);
+  console.log(`   ✓ Tweet ID: ${tweets[0].id}`);
   return tweets[0].id;
 }
 
@@ -376,7 +383,10 @@ async function postTweet(text, quoteTweetId = null) {
   const res = await httpsPost(
     TWEET_URL,
     JSON.stringify(payload),
-    { Authorization: buildAuthHeader("POST", TWEET_URL), "Content-Type": "application/json" }
+    {
+      Authorization:  buildAuthHeader("POST", TWEET_URL),
+      "Content-Type": "application/json",
+    }
   );
 
   console.log(`   Twitter response: ${res.status}`);
@@ -394,21 +404,24 @@ async function postTweet(text, quoteTweetId = null) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log("⚽ World Cup Bot — Breaking News Edition starting...");
+  console.log("⚽ World Cup Bot — Professional News Edition starting...");
 
-  // Validate secrets
-  const required = ["GROQ_API_KEY","TWITTER_API_KEY","TWITTER_API_SECRET","TWITTER_ACCESS_TOKEN","TWITTER_ACCESS_SECRET"];
+  const required = [
+    "GROQ_API_KEY","TWITTER_API_KEY","TWITTER_API_SECRET",
+    "TWITTER_ACCESS_TOKEN","TWITTER_ACCESS_SECRET",
+  ];
   for (const key of required) {
     if (!process.env[key]) throw new Error(`Missing secret: ${key}`);
   }
   console.log("✅ All secrets present");
 
-  // Always fetch real news first — everything is anchored to it
+  // Fetch real news — always the anchor
   const headlines = await getLatestHeadlines();
-  if (headlines.length === 0) throw new Error("No headlines fetched — all RSS feeds failed");
+  if (headlines.length === 0) throw new Error("All RSS feeds failed — no headlines available");
 
-  const headline = pickFreshHeadline(headlines);
-  console.log(`📰 Today's anchor: "${headline.title}" — ${headline.source}`);
+  const story = pickFreshHeadline(headlines);
+  console.log(`📰 Story: "${story.title}"`);
+  console.log(`📝 Details: "${story.description.slice(0, 100)}..."`);
 
   // Pick tweet type
   const type = TWEET_TYPES[Math.floor(Math.random() * TWEET_TYPES.length)];
@@ -421,7 +434,7 @@ async function main() {
 
     try {
       const tweetId   = await getLatestTweetId(username);
-      const prompt    = PROMPTS.quotebanter(headline.title, username);
+      const prompt    = PROMPTS.quotereact(story.title, story.description, username);
       const tweetText = await generateTweet(prompt);
 
       console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
@@ -430,9 +443,8 @@ async function main() {
       await postTweet(tweetText, tweetId);
 
     } catch (e) {
-      // Fallback to breaking news if quote tweet fails
-      console.warn(`⚠️  Quote tweet failed (${e.message}) — falling back to breaking news`);
-      const prompt    = PROMPTS.breaking(headline.title, headline.source);
+      console.warn(`⚠️  Quote tweet failed (${e.message}) — falling back to news`);
+      const prompt    = PROMPTS.news(story.title, story.description, story.source);
       const tweetText = await generateTweet(prompt);
       console.log(`✍️  Fallback (${tweetText.length} chars): ${tweetText}`);
       await postTweet(tweetText);
@@ -440,10 +452,10 @@ async function main() {
     return;
   }
 
-  // ── Original tweet flow (breaking or newsbanter) ──
-  const prompt    = type === "breaking"
-    ? PROMPTS.breaking(headline.title, headline.source)
-    : PROMPTS.newsbanter(headline.title, headline.source);
+  // ── News or analysis flow ──
+  const prompt = type === "news"
+    ? PROMPTS.news(story.title, story.description, story.source)
+    : PROMPTS.analysis(story.title, story.description, story.source);
 
   const tweetText = await generateTweet(prompt);
   console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
@@ -453,7 +465,7 @@ async function main() {
   await postTweet(tweetText);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error("❌ Bot failed:", err.message);
   process.exit(1);
 });
