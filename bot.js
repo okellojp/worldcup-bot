@@ -1,6 +1,8 @@
 // ============================================================
-//  World Cup Twitter Bot — Professional News Edition
-//  Tweets real news WITH details, serious tone, no banter
+//  @oj_pulse — Crypto News Bot
+//  Covers: Bitcoin, Ethereum, Altcoins, DeFi, NFTs, Regulation
+//  Tone: Professional + Informative + African Crypto Angle
+//  Affiliate: Binance + Bybit (links in every relevant tweet)
 //  AI: Groq (free tier) — llama-3.3-70b-versatile
 //  Scheduler: GitHub Actions (free)
 //  Posting: X/Twitter API (pay-per-use)
@@ -11,6 +13,9 @@
 //    TWITTER_API_SECRET
 //    TWITTER_ACCESS_TOKEN
 //    TWITTER_ACCESS_SECRET
+//
+//  IMPORTANT: Replace the affiliate links below with YOUR
+//  actual Binance and Bybit affiliate links before deploying
 // ============================================================
 
 const https   = require("https");
@@ -19,29 +24,71 @@ const crypto  = require("crypto");
 const fs      = require("fs");
 const { URL } = require("url");
 
-// ─── RSS Feeds ─────────────────────────────────────────────
+// ─── YOUR AFFILIATE LINKS — replace with your actual links ─
+const AFFILIATE = {
+  binance: "https://www.binance.com/referral/earn-together/refer2earn-usdc/claim?hl=en&ref=GRO_28502_49PKK",
+  bybit:   "https://www.bybit.com/invite?ref=9Z9QRPA",
+};
+
+// ─── RSS Feeds — Crypto News Sources ──────────────────────
 
 const RSS_FEEDS = [
-  { url: "https://feeds.bbci.co.uk/sport/football/rss.xml",   source: "BBC Sport"   },
-  { url: "https://www.espn.com/espn/rss/soccer/news",         source: "ESPN Soccer" },
-  { url: "https://www.goal.com/feeds/en/news",                source: "Goal.com"    },
-  { url: "https://www.skysports.com/rss/12040",               source: "Sky Sports"  },
-  { url: "https://talksport.com/feed/",                       source: "TalkSPORT"   },
+  { url: "https://cointelegraph.com/rss",                        source: "CoinTelegraph"   },
+  { url: "https://coindesk.com/arc/outboundfeeds/rss/",         source: "CoinDesk"        },
+  { url: "https://decrypt.co/feed",                             source: "Decrypt"         },
+  { url: "https://bitcoinmagazine.com/.rss/full/",              source: "Bitcoin Magazine" },
+  { url: "https://thedefiant.io/feed",                          source: "The Defiant"     },
 ];
 
-// Big accounts to quote tweet
+// Big crypto accounts to quote tweet
 const QUOTE_ACCOUNTS = [
-  "433", "OptaJoe", "FabrizioRomano",
-  "brfootball", "BBCSport", "ESPN_FC",
-  "SkySportsNews", "goal", "TalkSPORT",
+  // Media accounts
+  "CoinDesk",
+  "Cointelegraph",
+  "DocumentingBTC",
+  "BitcoinMagazine",
+  "WatcherGuru",
+  "crypto",
+  "DecryptMedia",
+  "thedefiant",
+  "binance",
+  "bybit_official",
+  // Crypto whales
+  "saylor",
+  "VitalikButerin",
+  "cz_binance",
+  "APompliano",
+  "RaoulGMI",
+  "CathieDWood",
+  "aantonop",
+  "naval",
+  "woonomic",
+  "100trillionUSD",
 ];
 
-// Weighted pool — 50% news report, 30% analysis, 20% quote tweet
+// Content categories for variety
+const CATEGORIES = {
+  bitcoin:    ["Bitcoin", "BTC", "Lightning Network", "Bitcoin ETF", "Satoshi"],
+  ethereum:   ["Ethereum", "ETH", "Vitalik", "EIP", "Ethereum upgrade"],
+  altcoins:   ["Solana", "XRP", "BNB", "Cardano", "Avalanche", "Polygon", "altcoin"],
+  defi:       ["DeFi", "DEX", "liquidity pool", "yield farming", "TVL", "protocol"],
+  nfts:       ["NFT", "OpenSea", "digital art", "collection", "mint"],
+  regulation: ["SEC", "regulation", "crypto law", "CBDC", "crypto ban", "crypto bill"],
+  africa:     ["Africa", "Uganda", "Kenya", "Nigeria", "Ghana", "crypto adoption", "M-Pesa"],
+};
+
+// Weighted pool
+// 40% breaking news, 25% analysis, 20% bullish hype, 15% quote tweet
 const TWEET_TYPES = [
-  "news",     "news",     "news",     "news",     "news",
-  "analysis", "analysis", "analysis",
-  "quote",    "quote",
+  "breaking",  "breaking",  "breaking",  "breaking",
+  "analysis",  "analysis",  "analysis",  "analysis",  "analysis",
+  "hype",      "hype",      "hype",      "hype",
+  "quote",     "quote",     "quote",
 ];
+
+// Affiliate push — every 3rd tweet subtly pushes an affiliate
+// This is handled in the prompt logic below
+let tweetCount = 0;
 
 // ─── HTTP helpers ──────────────────────────────────────────
 
@@ -91,7 +138,7 @@ function httpsPost(url, body, headers) {
   });
 }
 
-// ─── RSS Parser — extracts title AND description ───────────
+// ─── RSS Parser ────────────────────────────────────────────
 
 function parseRSS(xml) {
   const items = [];
@@ -105,7 +152,7 @@ function parseRSS(xml) {
     const pubDate = extractTag(block, "pubDate");
     if (title) items.push({
       title:       cleanText(title),
-      description: cleanText(desc || ""),
+      description: cleanText(desc || "").slice(0, 300),
       link:        link || "",
       pubDate:     pubDate ? new Date(pubDate) : new Date(),
     });
@@ -128,7 +175,17 @@ function cleanText(str) {
     .replace(/\s+/g, " ").trim();
 }
 
-// ─── Fetch headlines with full descriptions ────────────────
+// ─── Detect content category from headline ─────────────────
+
+function detectCategory(title) {
+  const t = title.toLowerCase();
+  for (const [cat, keywords] of Object.entries(CATEGORIES)) {
+    if (keywords.some(k => t.includes(k.toLowerCase()))) return cat;
+  }
+  return "bitcoin"; // default
+}
+
+// ─── Fetch latest headlines ────────────────────────────────
 
 async function getLatestHeadlines() {
   const allItems = [];
@@ -139,7 +196,7 @@ async function getLatestHeadlines() {
       const { body } = await httpGet(feed.url);
       const items = parseRSS(body)
         .slice(0, 8)
-        .map(item => ({ ...item, source: feed.source }));
+        .map(item => ({ ...item, source: feed.source, category: detectCategory(item.title) }));
       console.log(`   ✓ ${items.length} stories`);
       allItems.push(...items);
     } catch (e) {
@@ -161,12 +218,13 @@ async function getLatestHeadlines() {
   }
 
   console.log(`📰 ${fresh.length} unique stories available`);
-  return fresh.slice(0, 15);
+  return fresh.slice(0, 20);
 }
 
 // ─── Deduplication ─────────────────────────────────────────
 
-const SEEN_FILE = "/tmp/seen_headlines.json";
+const SEEN_FILE  = "/tmp/seen_crypto.json";
+const COUNT_FILE = "/tmp/tweet_count.json";
 
 function loadSeen() {
   try { return JSON.parse(fs.readFileSync(SEEN_FILE, "utf8")); }
@@ -174,7 +232,16 @@ function loadSeen() {
 }
 
 function saveSeen(arr) {
-  fs.writeFileSync(SEEN_FILE, JSON.stringify(arr.slice(-80)));
+  fs.writeFileSync(SEEN_FILE, JSON.stringify(arr.slice(-100)));
+}
+
+function loadCount() {
+  try { return JSON.parse(fs.readFileSync(COUNT_FILE, "utf8")).count || 0; }
+  catch { return 0; }
+}
+
+function saveCount(n) {
+  fs.writeFileSync(COUNT_FILE, JSON.stringify({ count: n }));
 }
 
 function pickFreshHeadline(headlines) {
@@ -193,70 +260,104 @@ function pickFreshHeadline(headlines) {
   return pick;
 }
 
+// ─── Affiliate link selector ───────────────────────────────
+// Rotates between Binance and Bybit every other affiliate push
+
+function getAffiliateLink(count) {
+  return count % 2 === 0 ? AFFILIATE.binance : AFFILIATE.bybit;
+}
+
+function getAffiliateName(count) {
+  return count % 2 === 0 ? "Binance" : "Bybit";
+}
+
 // ─── Prompts ───────────────────────────────────────────────
 
 const PROMPTS = {
 
-  // 50% — Straight news report with detail
-  news: (title, description, source) =>
-    `You are a professional football news Twitter account covering the World Cup and global football.
+  // 40% — Breaking news with detail
+  breaking: (title, description, source, addAffiliate, affiliateName, affiliateLink) =>
+    `You are @oj_pulse, a professional crypto news Twitter account covering Bitcoin, Ethereum, DeFi, NFTs, altcoins and blockchain regulation. You have an African perspective and a mix of professional, informative, and bullish tones.
+
+BREAKING NEWS from ${source}:
+HEADLINE: "${title}"
+DETAILS: "${description}"
+
+Write ONE informative tweet reporting this breaking crypto news with key details.
+
+Rules:
+- Report the news clearly and factually — headline + most important detail from the description
+- Professional but with energy — this is BREAKING news in crypto
+- Include price context or percentage if mentioned in the details
+- Use 1-2 relevant crypto emojis only (₿ 🔥 📈 📉 🚨 ⚡ 🏦 🌍)
+- Add 2-3 relevant hashtags e.g. #Bitcoin #Crypto #DeFi #Ethereum #Web3 #BTC
+- Under 260 characters${addAffiliate ? `
+- End with: "Trade on ${affiliateName}: ${affiliateLink}"` : ""}
+- No jokes, no banter
+- Do NOT just repeat the headline — add detail
+
+Output the tweet text only. Nothing else.`,
+
+  // 25% — Deep analytical take
+  analysis: (title, description, source, addAffiliate, affiliateName, affiliateLink) =>
+    `You are @oj_pulse, an experienced crypto analyst and journalist on Twitter with an African perspective.
 
 News from ${source}:
 HEADLINE: "${title}"
 DETAILS: "${description}"
 
-Write ONE informative tweet that reports this news story with key details included.
+Write ONE analytical tweet explaining what this news means for the crypto market and investors.
 
 Rules:
-- Include the most important facts from both the headline AND the details
-- Write in a clear, professional, journalistic tone — no jokes, no banter, no sarcasm
-- Structure: state what happened, add 1 key detail or context that matters
-- Use 1 relevant football emoji only if it adds clarity (⚽ 🏆 📋) — no party emojis, no laugh emojis
-- Add 1-2 relevant hashtags e.g. #WorldCup #PremierLeague #UEFA
-- Under 270 characters
-- Do NOT just repeat the headline — expand on it with the detail provided
-- No quotation marks around the tweet
+- Go beyond the headline — explain significance, implications, or what to watch next
+- Can reference price impact, market sentiment, or what this means for African crypto holders
+- Credible, knowledgeable tone — like an analyst who understands the market
+- Use 1 emoji max (📊 📈 💡 🔍 ⚡)
+- 1-2 hashtags max
+- Under 260 characters${addAffiliate ? `
+- End with: "Start trading on ${affiliateName}: ${affiliateLink}"` : ""}
 
 Output the tweet text only. Nothing else.`,
 
-  // 30% — Analytical take with context
-  analysis: (title, description, source) =>
-    `You are an experienced football analyst and journalist on Twitter.
+  // 20% — Bullish hype with African angle
+  hype: (title, description, source, addAffiliate, affiliateName, affiliateLink) =>
+    `You are @oj_pulse, a bullish crypto enthusiast with a strong African perspective. You believe crypto is transforming Africa's financial future.
 
 News from ${source}:
 HEADLINE: "${title}"
 DETAILS: "${description}"
 
-Write ONE analytical tweet that puts this news in context and explains why it matters.
+Write ONE bullish, energetic tweet reacting to this news with an African/global crypto perspective.
 
 Rules:
-- Go beyond the headline — explain the significance or implication of this story
-- Reference specific facts from the details provided
-- Write like a knowledgeable football journalist giving informed commentary
-- Serious, credible tone — no memes, no banter, no jokes
-- Can include a stat, historical context, or tactical implication if relevant
-- Use 1 relevant hashtag max
-- No emojis unless absolutely necessary (e.g. ⚽ for football context only)
-- Under 270 characters
+- Be enthusiastic and bullish — crypto is the future and this news proves it
+- Connect to African context where possible (financial freedom, remittances, unbanked population)
+- Inspire followers to get involved in crypto
+- Use 2-3 emojis that match the hype (🚀 🌍 💰 🔥 ₿ 📈 ⚡ 🙌)
+- 2-3 hashtags including #Africa or #CryptoAfrica where relevant
+- Under 260 characters${addAffiliate ? `
+- End with: "Get started on ${affiliateName}: ${affiliateLink}"` : ""}
 
 Output the tweet text only. Nothing else.`,
 
-  // 20% — Serious quote tweet reacting to a big account's news
-  quotereact: (title, description, username) =>
-    `You are a professional football journalist on Twitter.
+  // 15% — Quote tweet a big crypto account
+  quote: (title, description, username, addAffiliate, affiliateName, affiliateLink) =>
+    `You are @oj_pulse, a professional crypto news account with an African perspective.
 
-@${username} just posted about this story:
+@${username} just posted about this crypto story:
 HEADLINE: "${title}"
 DETAILS: "${description}"
 
-Write a quote tweet that adds journalistic value — extra context, a key stat, an important detail they may have missed, or a well-informed perspective.
+Write a quote tweet adding valuable context, analysis, or an African crypto perspective on top of their post.
 
 Rules:
-- Serious, professional tone — no jokes, no banter
-- Add something of VALUE beyond what was already said
+- Add something of VALUE — extra context, implication for African markets, or key detail
+- Mix of professional and enthusiastic tone
 - Reference specific facts from the details
-- Under 200 characters (quoted tweet takes up space)
-- 1 hashtag max, no unnecessary emojis
+- Use 1-2 emojis (🌍 📈 ₿ 🔥 ⚡)
+- Under 200 characters (quoted tweet takes space)
+- 1 hashtag max${addAffiliate ? `
+- End with: "${affiliateName}: ${affiliateLink}"` : ""}
 
 Output the quote tweet text only. Nothing else.`,
 
@@ -271,8 +372,8 @@ async function generateTweet(promptText) {
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model:       "llama-3.3-70b-versatile",
-      max_tokens:  180,
-      temperature: 0.6,   // lower = more focused, professional
+      max_tokens:  200,
+      temperature: 0.7,
       messages:    [{ role: "user", content: promptText }],
     },
     {
@@ -319,10 +420,10 @@ function buildAuthHeader(method, url, queryParams = {}) {
     .join(", ");
 }
 
-// ─── Fetch latest tweet ID from account ───────────────────
+// ─── Fetch latest tweet ID ─────────────────────────────────
 
 async function getLatestTweetId(username) {
-  console.log(`🔍 Fetching latest tweet from @${username}...`);
+  console.log(`🔍 Fetching tweet from @${username}...`);
 
   const userUrl = `https://api.twitter.com/2/users/by/username/${username}`;
   const userRes = await new Promise((resolve, reject) => {
@@ -368,7 +469,7 @@ async function getLatestTweetId(username) {
   const tweets = JSON.parse(tlRes.body).data;
   if (!tweets?.length) throw new Error(`No tweets for @${username}`);
 
-  console.log(`   ✓ Tweet ID: ${tweets[0].id}`);
+  console.log(`   ✓ Got tweet ID: ${tweets[0].id}`);
   return tweets[0].id;
 }
 
@@ -404,7 +505,7 @@ async function postTweet(text, quoteTweetId = null) {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main() {
-  console.log("⚽ World Cup Bot — Professional News Edition starting...");
+  console.log("🚀 @oj_pulse Crypto Bot starting...");
 
   const required = [
     "GROQ_API_KEY","TWITTER_API_KEY","TWITTER_API_SECRET",
@@ -415,12 +516,24 @@ async function main() {
   }
   console.log("✅ All secrets present");
 
-  // Fetch real news — always the anchor
+  // Load and increment tweet count (controls affiliate frequency)
+  const count       = loadCount();
+  const newCount    = count + 1;
+  saveCount(newCount);
+
+  // Push affiliate link every 3rd tweet
+  const addAffiliate   = newCount % 3 === 0;
+  const affiliateName  = getAffiliateName(newCount);
+  const affiliateLink  = getAffiliateLink(newCount);
+
+  console.log(`📊 Tweet count: ${newCount} | Affiliate push: ${addAffiliate ? affiliateName : "No"}`);
+
+  // Fetch latest crypto news
   const headlines = await getLatestHeadlines();
-  if (headlines.length === 0) throw new Error("All RSS feeds failed — no headlines available");
+  if (headlines.length === 0) throw new Error("All RSS feeds failed — no headlines");
 
   const story = pickFreshHeadline(headlines);
-  console.log(`📰 Story: "${story.title}"`);
+  console.log(`📰 Story: "${story.title}" [${story.category}]`);
   console.log(`📝 Details: "${story.description.slice(0, 100)}..."`);
 
   // Pick tweet type
@@ -434,17 +547,21 @@ async function main() {
 
     try {
       const tweetId   = await getLatestTweetId(username);
-      const prompt    = PROMPTS.quotereact(story.title, story.description, username);
+      const prompt    = PROMPTS.quote(
+        story.title, story.description, username,
+        addAffiliate, affiliateName, affiliateLink
+      );
       const tweetText = await generateTweet(prompt);
-
       console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
       if (tweetText.length > 280) throw new Error(`Too long: ${tweetText.length} chars`);
-
       await postTweet(tweetText, tweetId);
 
     } catch (e) {
-      console.warn(`⚠️  Quote tweet failed (${e.message}) — falling back to news`);
-      const prompt    = PROMPTS.news(story.title, story.description, story.source);
+      console.warn(`⚠️  Quote tweet failed (${e.message}) — falling back to breaking news`);
+      const prompt    = PROMPTS.breaking(
+        story.title, story.description, story.source,
+        addAffiliate, affiliateName, affiliateLink
+      );
       const tweetText = await generateTweet(prompt);
       console.log(`✍️  Fallback (${tweetText.length} chars): ${tweetText}`);
       await postTweet(tweetText);
@@ -452,10 +569,15 @@ async function main() {
     return;
   }
 
-  // ── News or analysis flow ──
-  const prompt = type === "news"
-    ? PROMPTS.news(story.title, story.description, story.source)
-    : PROMPTS.analysis(story.title, story.description, story.source);
+  // ── Original tweet flow ──
+  let prompt;
+  if (type === "breaking") {
+    prompt = PROMPTS.breaking(story.title, story.description, story.source, addAffiliate, affiliateName, affiliateLink);
+  } else if (type === "analysis") {
+    prompt = PROMPTS.analysis(story.title, story.description, story.source, addAffiliate, affiliateName, affiliateLink);
+  } else {
+    prompt = PROMPTS.hype(story.title, story.description, story.source, addAffiliate, affiliateName, affiliateLink);
+  }
 
   const tweetText = await generateTweet(prompt);
   console.log(`✍️  Generated (${tweetText.length} chars): ${tweetText}`);
